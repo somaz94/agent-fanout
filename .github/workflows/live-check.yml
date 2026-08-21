@@ -1,0 +1,51 @@
+# The metered counterpart to smoke.yml, kept separate on purpose: smoke's whole
+# promise is that a run costs nothing, and an input that can turn that off would
+# make the promise conditional on reading the dispatch form carefully.
+#
+# This one DOES call the agent. It defaults to a single variant and a task small
+# enough to verify by eye, because the question it answers is not "is the agent
+# any good" but "does the prompt actually reach it" — the one thing dry_run
+# cannot check, and the thing that was broken until v1.0.2 (a path was being
+# handed to an input that takes inline text).
+#
+# It opens a real draft PR. Close it and delete the branch afterwards.
+name: Live check (spends credit)
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: 'Issue number to post the comparison to'
+        required: true
+        type: number
+      variants:
+        description: 'Keep this to ONE variant unless you mean to pay for more'
+        required: false
+        default: 'conservative'
+        type: string
+      task:
+        description: 'Deliberately small — this checks delivery, not capability'
+        required: false
+        default: 'Add a single line to the end of README.md reading: "Verified by a live fan-out check."'
+        type: string
+
+permissions: {}
+
+jobs:
+  live:
+    uses: ./.github/workflows/fanout.yml
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    with:
+      issue: ${{ inputs.issue }}
+      task: ${{ inputs.task }}
+      variants: ${{ inputs.variants }}
+      # One, so a mistake in the dispatch form costs one run and not three.
+      max_variants: 1
+      timeout_minutes: 10
+      dry_run: false
+    secrets:
+      claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

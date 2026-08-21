@@ -73,6 +73,14 @@ N variants is N× the work. Two credentials are accepted and exactly one must be
 
 <br/>
 
+## Releasing
+
+`release.yml` triggers `changelog-generator.yml` and `contributors.yml`, and **both push commits to main**. So the tag you just pushed is followed by main moving underneath you — always `git fetch` and confirm `HEAD == origin/main` before cutting the next one. Skipping that produced a tag pointing at a commit that was not on mainline, because the tag push succeeded while the branch push was rejected: git does not roll one back for the other.
+
+The action stays on `image: Dockerfile`. Converting to `docker://ghcr.io/somaz94/agent-fanout:<version>` is an optimisation worth ~31s per consumer run and needs the converted `release.yml` (delegating to `somaz94/.github`'s reusable workflow) plus `release-docker-action.sh` — not a prerequisite for releasing.
+
+<br/>
+
 ## Conventions
 
 - Go, **stdlib only** — the module has no third-party dependency and adding the first one needs a reason
