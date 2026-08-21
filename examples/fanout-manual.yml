@@ -1,0 +1,36 @@
+# Manual variant: dispatch a fan-out yourself and choose the attempt count at
+# run time. Useful for trying the pipeline once before wiring it to a label —
+# set `dry_run` and the whole thing runs without calling the agent.
+name: Agent fan-out (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: 'Issue number'
+        required: true
+        type: number
+      variants:
+        description: 'Comma-separated variants'
+        required: false
+        default: 'conservative,refactor'
+        type: string
+      dry_run:
+        description: 'Run the pipeline without invoking the agent'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  fanout:
+    uses: somaz94/agent-fanout/.github/workflows/fanout.yml@v1
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    with:
+      issue: ${{ inputs.issue }}
+      variants: ${{ inputs.variants }}
+      dry_run: ${{ inputs.dry_run }}
+    secrets:
+      anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

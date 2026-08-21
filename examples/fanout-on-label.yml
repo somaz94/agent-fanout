@@ -1,0 +1,30 @@
+# Copy this into YOUR repository as .github/workflows/agent-fanout.yml
+#
+# Label an issue `fanout` and three attempts run, each opening a draft PR, with
+# one comparison table posted back to the issue.
+#
+# The label trigger is deliberate. `issue_comment` and `issues: opened` both let
+# anyone who can file an issue spend your API budget; adding a label needs write
+# access to the repository.
+name: Agent fan-out
+
+on:
+  issues:
+    types: [labeled]
+
+jobs:
+  fanout:
+    if: github.event.label.name == 'fanout'
+    uses: somaz94/agent-fanout/.github/workflows/fanout.yml@v1
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    with:
+      issue: ${{ github.event.issue.number }}
+      task: ${{ github.event.issue.body }}
+      variants: conservative,refactor,minimal-diff
+      max_variants: 3
+      test_command: make test
+    secrets:
+      anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

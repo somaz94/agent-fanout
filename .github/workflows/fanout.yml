@@ -1,0 +1,338 @@
+# Reusable fan-out: run one coding task as N independent attempts and open one
+# draft PR per attempt, then post a single comparison table back to the issue.
+#
+# Call it from your own repository:
+#
+#   jobs:
+#     fanout:
+#       uses: somaz94/agent-fanout/.github/workflows/fanout.yml@v1
+#       with:
+#         issue: ${{ github.event.issue.number }}
+#         task: ${{ github.event.issue.body }}
+#       secrets:
+#         anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+#
+# COST: this runs the agent once per variant against the metered API. Three
+# variants is three times the tokens of one run, and there is no subscription
+# path in CI. `max_variants` is a ceiling you cannot exceed by accident, and
+# `dry_run` walks the whole pipeline without calling the agent at all.
+name: Agent fan-out
+
+on:
+  workflow_call:
+    inputs:
+      issue:
+        description: 'Issue number the task came from; the comparison is posted here'
+        type: number
+        required: true
+      task:
+        description: 'What the agent should do. Defaults to the issue body when empty.'
+        type: string
+        required: false
+        default: ''
+      variants:
+        description: 'Comma-separated variant names. Each is a different instruction to the same agent, not a different agent.'
+        type: string
+        required: false
+        default: 'conservative,refactor,minimal-diff'
+      max_variants:
+        description: 'Hard ceiling on how many attempts may run. Exceeding it fails the run before a single token is spent.'
+        type: number
+        required: false
+        default: 3
+      base_ref:
+        description: 'Branch the attempts fork from'
+        type: string
+        required: false
+        default: ''
+      model:
+        description: 'Model passed through to Claude Code'
+        type: string
+        required: false
+        default: ''
+      test_command:
+        description: 'Command run inside each worktree after the agent finishes. Its exit status becomes the Tests column.'
+        type: string
+        required: false
+        default: ''
+      timeout_minutes:
+        description: 'Per-attempt timeout'
+        type: number
+        required: false
+        default: 30
+      dry_run:
+        description: 'Walk the pipeline without invoking the agent or opening PRs'
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      anthropic_api_key:
+        description: 'ANTHROPIC_API_KEY. Not required when dry_run is true.'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  # The guard is a separate job so the ceiling is enforced BEFORE any runner
+  # starts an agent. Validating inside the matrix would spend the tokens first
+  # and complain afterwards.
+  plan:
+    name: Plan attempts
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      variants: ${{ steps.plan.outputs.variants }}
+    steps:
+      - name: Resolve and bound the variant list
+        id: plan
+        env:
+          VARIANTS: ${{ inputs.variants }}
+          MAX: ${{ inputs.max_variants }}
+        run: |
+          set -euo pipefail
+
+          # Split on commas, trim, drop blanks, and reject duplicates: two
+          # attempts under one name collide on their branch and their artifact,
+          # and the second silently overwrites the first.
+          mapfile -t list < <(printf '%s' "$VARIANTS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$')
+
+          if [ "${#list[@]}" -eq 0 ]; then
+            echo "::error::no variants were given"; exit 1
+          fi
+          if [ "$(printf '%s\n' "${list[@]}" | sort | uniq -d | wc -l)" -gt 0 ]; then
+            echo "::error::duplicate variant names: $(printf '%s\n' "${list[@]}" | sort | uniq -d | tr '\n' ' ')"
+            exit 1
+          fi
+          if [ "${#list[@]}" -gt "$MAX" ]; then
+            echo "::error::${#list[@]} variants requested but max_variants is $MAX. Every attempt is a full metered agent run; raise the ceiling deliberately."
+            exit 1
+          fi
+          for v in "${list[@]}"; do
+            case "$v" in
+              *[!a-zA-Z0-9._-]*) echo "::error::variant '$v' has characters that cannot go in a branch name"; exit 1 ;;
+            esac
+          done
+
+          printf 'matrix=' >> "$GITHUB_OUTPUT"
+          printf '%s\n' "${list[@]}" | jq -R . | jq -cs '{variant: .}' >> "$GITHUB_OUTPUT"
+          echo "variants=$(IFS=,; echo "${list[*]}")" >> "$GITHUB_OUTPUT"
+          echo "Planned ${#list[@]} attempt(s): ${list[*]}"
+
+  attempt:
+    name: ${{ matrix.variant }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    permissions:
+      contents: write
+      pull-requests: write
+    strategy:
+      # One attempt failing must not cancel the others. The whole point is to
+      # compare what the survivors produced, and a cancelled sibling reports as
+      # missing — which reads as a harness fault rather than as a policy.
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.base_ref }}
+
+      - name: Prepare attempt
+        id: prep
+        env:
+          VARIANT: ${{ matrix.variant }}
+          ISSUE: ${{ inputs.issue }}
+        run: |
+          set -euo pipefail
+          branch="agent-fanout/issue-${ISSUE}/${VARIANT}"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "started=$(date +%s)" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git switch -c "$branch"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Compose the variant instruction
+        id: prompt
+        env:
+          VARIANT: ${{ matrix.variant }}
+          TASK: ${{ inputs.task }}
+        run: |
+          set -euo pipefail
+          case "$VARIANT" in
+            conservative)
+              angle="Make the smallest change that solves the problem. Do not restructure existing code, do not rename anything, and match the surrounding style exactly." ;;
+            refactor)
+              angle="Solve the problem and leave the touched code better than you found it. Restructuring adjacent code is in scope when it removes duplication the fix would otherwise multiply." ;;
+            minimal-diff)
+              angle="Optimise for review effort. Produce the fewest changed lines that a reviewer can verify by reading the diff alone, even if a larger change would be tidier." ;;
+            *)
+              angle="Solve the problem in the way you judge best. State your approach in the PR body." ;;
+          esac
+
+          # The instruction is written to a file rather than interpolated into a
+          # shell string: an issue body is attacker-supplied text on a public
+          # repo, and passing it through `run:` is a script-injection sink.
+          {
+            printf '%s\n\n' "$angle"
+            printf 'Task:\n%s\n' "$TASK"
+          } > /tmp/fanout-prompt.md
+          echo "path=/tmp/fanout-prompt.md" >> "$GITHUB_OUTPUT"
+
+      - name: Run Claude Code
+        id: agent
+        if: ${{ !inputs.dry_run }}
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.anthropic_api_key }}
+          prompt: ${{ steps.prompt.outputs.path }}
+          claude_args: ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
+
+      - name: Run tests
+        id: tests
+        if: ${{ inputs.test_command != '' && !inputs.dry_run }}
+        continue-on-error: true
+        run: ${{ inputs.test_command }}
+
+      - name: Measure the change
+        id: measure
+        env:
+          BASE: ${{ steps.prep.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          git add -A
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "files=0"       >> "$GITHUB_OUTPUT"
+            echo "add=0"         >> "$GITHUB_OUTPUT"
+            echo "del=0"         >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "files=$(git diff --cached --name-only | wc -l | tr -d ' ')" >> "$GITHUB_OUTPUT"
+          echo "add=$(git diff --cached --numstat | awk '{s+=$1} END {print s+0}')" >> "$GITHUB_OUTPUT"
+          echo "del=$(git diff --cached --numstat | awk '{s+=$2} END {print s+0}')" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and open a draft PR
+        id: pr
+        if: ${{ steps.measure.outputs.changed == 'true' && !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VARIANT: ${{ matrix.variant }}
+          ISSUE: ${{ inputs.issue }}
+          BRANCH: ${{ steps.prep.outputs.branch }}
+        run: |
+          set -euo pipefail
+          git commit -q -m "feat: ${VARIANT} attempt for #${ISSUE}"
+          git push -q -u origin "$BRANCH"
+
+          # Draft on purpose. These are candidates, and one of them is going to
+          # be closed; a ready-for-review PR pings every code owner on all N.
+          url=$(gh pr create \
+            --draft \
+            --title "[${VARIANT}] attempt for #${ISSUE}" \
+            --body "Automated fan-out attempt \`${VARIANT}\` for #${ISSUE}. One of several candidates — see the comparison on the issue." \
+            --base "${{ github.ref_name }}" \
+            --head "$BRANCH")
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "number=$(basename "$url")" >> "$GITHUB_OUTPUT"
+
+      - name: Write the result file
+        if: always()
+        env:
+          VARIANT: ${{ matrix.variant }}
+          BRANCH: ${{ steps.prep.outputs.branch }}
+          STARTED: ${{ steps.prep.outputs.started }}
+          AGENT_OUTCOME: ${{ steps.agent.outcome }}
+          TESTS_OUTCOME: ${{ steps.tests.outcome }}
+          CHANGED: ${{ steps.measure.outputs.changed }}
+          FILES: ${{ steps.measure.outputs.files }}
+          ADD: ${{ steps.measure.outputs.add }}
+          DEL: ${{ steps.measure.outputs.del }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/fanout-result
+
+          # This runs under `always()` so that a variant which failed anywhere
+          # above still reports. Without it a crashed attempt uploads nothing,
+          # and "the agent errored" becomes indistinguishable from "the job was
+          # never scheduled".
+          if [ "$DRY_RUN" = "true" ]; then
+            status="no-changes"
+          elif [ "$AGENT_OUTCOME" = "failure" ]; then
+            status="failed"
+          elif [ "$CHANGED" = "true" ]; then
+            status="success"
+          else
+            status="no-changes"
+          fi
+
+          case "$TESTS_OUTCOME" in
+            success) tests="passed" ;;
+            failure) tests="failed" ;;
+            *)       tests="skipped" ;;
+          esac
+
+          jq -n \
+            --arg  variant  "$VARIANT" \
+            --arg  status   "$status" \
+            --arg  branch   "$BRANCH" \
+            --arg  pr_url   "${PR_URL:-}" \
+            --arg  tests    "$tests" \
+            --arg  sha      "$(git rev-parse HEAD)" \
+            --argjson pr    "${PR_NUMBER:-0}" \
+            --argjson files "${FILES:-0}" \
+            --argjson add   "${ADD:-0}" \
+            --argjson del   "${DEL:-0}" \
+            --argjson dur   "$(( $(date +%s) - STARTED ))" \
+            '{variant:$variant, status:$status, branch:$branch, pr_number:$pr,
+              pr_url:$pr_url, files_changed:$files, additions:$add,
+              deletions:$del, duration_seconds:$dur, commit_sha:$sha,
+              test_status:$tests}' > "/tmp/fanout-result/${VARIANT}.json"
+
+          cat "/tmp/fanout-result/${VARIANT}.json"
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fanout-result-${{ matrix.variant }}
+          path: /tmp/fanout-result/
+          retention-days: 7
+
+  compare:
+    name: Compare
+    needs: [plan, attempt]
+    # always(): the comparison is most useful precisely when an attempt failed,
+    # and `needs` on a failed job would skip this and leave the issue silent.
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    steps:
+      - name: Download every attempt result
+        uses: actions/download-artifact@v4
+        with:
+          path: results
+          pattern: fanout-result-*
+
+      - name: Post the comparison
+        uses: somaz94/agent-fanout@v1
+        with:
+          results_dir: results
+          # Passing the planned list is what makes an attempt that uploaded
+          # NOTHING appear as a row. Without it the table quietly shrinks to the
+          # attempts that survived.
+          variants: ${{ needs.plan.outputs.variants }}
+          issue: ${{ inputs.issue }}
+          title: Agent fan-out for #${{ inputs.issue }}
+          dry_run: ${{ inputs.dry_run }}

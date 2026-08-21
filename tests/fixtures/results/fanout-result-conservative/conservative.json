@@ -1,0 +1,13 @@
+{
+  "variant": "conservative",
+  "status": "success",
+  "branch": "agent-fanout/issue-1/conservative",
+  "pr_number": 101,
+  "pr_url": "https://github.com/somaz94/agent-fanout/pull/101",
+  "files_changed": 2,
+  "additions": 18,
+  "deletions": 4,
+  "duration_seconds": 214,
+  "commit_sha": "1111111111111111111111111111111111111111",
+  "test_status": "passed"
+}

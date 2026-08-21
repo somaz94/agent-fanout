@@ -1,0 +1,63 @@
+name: Agent Fan-out Compare
+description: Collect the results of N parallel coding-agent attempts and post one comparison table back to the issue
+author: somaz94
+
+branding:
+  icon: git-pull-request
+  color: purple
+
+inputs:
+  results_dir:
+    description: 'Directory the attempt result artifacts were downloaded into (searched recursively for *.json)'
+    required: false
+    default: 'results'
+  variants:
+    description: 'Comma- or newline-separated list of variants the fan-out requested. Supplying it is what makes a variant that reported NOTHING show up as a row instead of vanishing from the comparison.'
+    required: false
+    default: ''
+  issue:
+    description: 'Issue number to post the comparison to. Omit to write only the job summary.'
+    required: false
+    default: ''
+  repository:
+    description: 'owner/name (defaults to GITHUB_REPOSITORY)'
+    required: false
+    default: ''
+  github_token:
+    description: 'Token used to post the comment. Needs issues:write.'
+    required: false
+    default: ${{ github.token }}
+  title:
+    description: 'Heading of the rendered comparison'
+    required: false
+    default: 'Agent fan-out results'
+  dry_run:
+    description: 'Render and print the comparison without posting it'
+    required: false
+    default: 'false'
+
+outputs:
+  comparison:
+    description: 'The rendered Markdown comparison table'
+  attempt_count:
+    description: 'Number of attempts in the comparison, including ones that reported nothing'
+  success_count:
+    description: 'Number of attempts that produced a reviewable change'
+  failed_count:
+    description: 'Number of attempts that reported a failure'
+  missing_count:
+    description: 'Number of requested variants that uploaded no result at all'
+  comment_url:
+    description: 'URL of the posted or updated comment (empty on dry run)'
+
+runs:
+  using: docker
+  image: Dockerfile
+  env:
+    INPUT_RESULTS_DIR: ${{ inputs.results_dir }}
+    INPUT_VARIANTS: ${{ inputs.variants }}
+    INPUT_ISSUE: ${{ inputs.issue }}
+    INPUT_REPOSITORY: ${{ inputs.repository }}
+    INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}
+    INPUT_TITLE: ${{ inputs.title }}
+    INPUT_DRY_RUN: ${{ inputs.dry_run }}

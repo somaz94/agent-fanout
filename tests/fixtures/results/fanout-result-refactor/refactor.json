@@ -1,0 +1,14 @@
+{
+  "variant": "refactor",
+  "status": "success",
+  "branch": "agent-fanout/issue-1/refactor",
+  "pr_number": 102,
+  "pr_url": "https://github.com/somaz94/agent-fanout/pull/102",
+  "files_changed": 9,
+  "additions": 260,
+  "deletions": 143,
+  "duration_seconds": 631,
+  "commit_sha": "2222222222222222222222222222222222222222",
+  "test_status": "failed",
+  "notes": "extracted the retry loop into its own package; two tests still reference the old symbol"
+}
