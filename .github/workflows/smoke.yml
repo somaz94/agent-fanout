@@ -1,8 +1,12 @@
-# Temporary: exercises the reusable workflow end to end with dry_run, so the
-# plan / credentials / attempt wiring is proven before the first release.
-# `compare` is expected to fail until v1 exists — inside a reusable workflow
-# `uses: ./` resolves against the CALLER's repository, so the action can only be
-# referenced by tag.
+# Exercises the whole reusable workflow with dry_run: plan, the credential
+# check, one attempt per variant and the comparison — without ever calling the
+# agent, so a run costs nothing. Worth keeping: it is what caught a heading
+# whose issue number a YAML comment had eaten, and it is the cheapest proof
+# that the four jobs still wire together after an edit.
+#
+# It calls the workflow by PATH, which only works from inside this repository.
+# A consumer must use the tag, because within a reusable workflow `uses: ./`
+# resolves against the CALLER's checkout.
 name: Smoke (dry run)
 
 on:

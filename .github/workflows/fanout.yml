@@ -477,5 +477,9 @@ jobs:
           # attempts that survived.
           variants: ${{ needs.plan.outputs.variants }}
           issue: ${{ inputs.issue }}
-          title: Agent fan-out for #${{ inputs.issue }}
+          # QUOTED. YAML treats a `#` preceded by whitespace as the start of a
+          # comment, so unquoted this read `Agent fan-out for` and the issue
+          # number was silently cut off the heading — a thing no linter flagged
+          # and only running it revealed.
+          title: "Agent fan-out for #${{ inputs.issue }}"
           dry_run: ${{ inputs.dry_run }}
