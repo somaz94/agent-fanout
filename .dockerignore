@@ -7,3 +7,8 @@ LICENSE
 Makefile
 coverage.out
 coverage.html
+
+# .gitignore declares these but a Docker build context does not honour it, so
+# `COPY . .` would carry a local .env straight into the builder stage.
+.env
+.env.*

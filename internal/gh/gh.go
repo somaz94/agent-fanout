@@ -67,9 +67,11 @@ type comment struct {
 // comment when one carrying marker is found.
 //
 // It returns the comment's HTML URL and whether an existing comment was
-// updated. A failure to LIST is not fatal to the post: losing the ability to
-// find the old comment should leave a duplicate, not leave the run with no
-// report at all.
+// updated. A failure to LIST is FATAL and deliberately so: falling through to
+// "post a new one" would append a duplicate table on every transient failure,
+// which is the pile-up the marker exists to prevent. An earlier version of this
+// comment claimed the opposite of the code — worse than a typo, because it
+// reads as permission to revert the behaviour the tests pin.
 func (c *Client) UpsertComment(ctx context.Context, issue int, marker, body string) (string, bool, error) {
 	if issue <= 0 {
 		return "", false, fmt.Errorf("issue number %d is not valid", issue)

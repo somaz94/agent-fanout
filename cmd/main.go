@@ -142,7 +142,7 @@ func stripMarker(body string) string {
 	lines := strings.Split(body, "\n")
 	out := lines[:0]
 	for _, l := range lines {
-		if strings.HasPrefix(strings.TrimSpace(l), "<!-- somaz94/agent-fanout") {
+		if strings.HasPrefix(strings.TrimSpace(l), report.MarkerPrefix) {
 			continue
 		}
 		out = append(out, l)

@@ -12,10 +12,11 @@
 #       secrets:
 #         anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 #
-# COST: this runs the agent once per variant against the metered API. Three
-# variants is three times the tokens of one run, and there is no subscription
-# path in CI. `max_variants` is a ceiling you cannot exceed by accident, and
-# `dry_run` walks the whole pipeline without calling the agent at all.
+# COST: this runs the agent once per variant. Three variants is three times the
+# work of one run, whichever credential is used — `anthropic_api_key` bills per
+# token, `claude_code_oauth_token` draws on a Claude subscription's limits.
+# `max_variants` is a ceiling you cannot exceed by accident, and `dry_run` walks
+# the whole pipeline without calling the agent at all.
 name: Agent fan-out
 
 on:
@@ -67,11 +68,22 @@ on:
         default: false
     secrets:
       anthropic_api_key:
-        description: 'ANTHROPIC_API_KEY. Not required when dry_run is true.'
+        description: 'ANTHROPIC_API_KEY — metered, billed per token. Not required when dry_run is true, nor when claude_code_oauth_token is supplied.'
+        required: false
+      claude_code_oauth_token:
+        description: 'Claude Code OAuth token — draws on a Claude subscription instead of metered API credit. An alternative to anthropic_api_key, not an addition; supply exactly one.'
         required: false
 
 permissions:
   contents: read
+
+# Branch names are deterministic, so a re-label or a second dispatch would be
+# rejected non-fast-forward and `gh pr create` would refuse a duplicate — every
+# variant failing from the second run onward. cancel-in-progress stays FALSE:
+# killing a run already mid-flight throws away metered agent time.
+concurrency:
+  group: agent-fanout-${{ inputs.issue }}
+  cancel-in-progress: false
 
 jobs:
   # The guard is a separate job so the ceiling is enforced BEFORE any runner
@@ -80,15 +92,20 @@ jobs:
   plan:
     name: Plan attempts
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       variants: ${{ steps.plan.outputs.variants }}
+      # Actions expressions have no arithmetic, so the job-level backstop is
+      # derived here rather than as `timeout_minutes + 10` at the use site.
+      job_timeout: ${{ steps.plan.outputs.job_timeout }}
     steps:
       - name: Resolve and bound the variant list
         id: plan
         env:
           VARIANTS: ${{ inputs.variants }}
           MAX: ${{ inputs.max_variants }}
+          ATTEMPT_TIMEOUT: ${{ inputs.timeout_minutes }}
         run: |
           set -euo pipefail
 
@@ -104,6 +121,21 @@ jobs:
             echo "::error::duplicate variant names: $(printf '%s\n' "${list[@]}" | sort | uniq -d | tr '\n' ' ')"
             exit 1
           fi
+          # `[ x -gt y ]` exits 2 on a non-integer, and inside an `if` condition
+          # `set -e` is suppressed and a non-zero status simply reads as FALSE.
+          # So an empty or fractional max_variants made the ceiling vanish
+          # silently — fail-OPEN, on the one guard the cost story rests on.
+          # `type: number` accepts 3.5, and a caller passing an unresolved
+          # expression can resolve it to empty, so both are reachable.
+          # (An example is not written out here: a literal expression inside a
+          # comment is still parsed by actionlint and fails the lint.)
+          case "$MAX" in
+            ''|*[!0-9]*) echo "::error::max_variants must be a positive integer, got '$MAX'"; exit 1 ;;
+          esac
+          if [ "$MAX" -lt 1 ]; then
+            echo "::error::max_variants must be at least 1, got '$MAX'"; exit 1
+          fi
+
           if [ "${#list[@]}" -gt "$MAX" ]; then
             echo "::error::${#list[@]} variants requested but max_variants is $MAX. Every attempt is a full metered agent run; raise the ceiling deliberately."
             exit 1
@@ -117,13 +149,57 @@ jobs:
           printf 'matrix=' >> "$GITHUB_OUTPUT"
           printf '%s\n' "${list[@]}" | jq -R . | jq -cs '{variant: .}' >> "$GITHUB_OUTPUT"
           echo "variants=$(IFS=,; echo "${list[*]}")" >> "$GITHUB_OUTPUT"
+          case "$ATTEMPT_TIMEOUT" in
+            ''|*[!0-9]*) echo "::error::timeout_minutes must be a positive integer, got '$ATTEMPT_TIMEOUT'"; exit 1 ;;
+          esac
+          if [ "$ATTEMPT_TIMEOUT" -lt 1 ]; then
+            echo "::error::timeout_minutes must be at least 1, got '$ATTEMPT_TIMEOUT'"; exit 1
+          fi
+          echo "job_timeout=$(( ATTEMPT_TIMEOUT + 10 ))" >> "$GITHUB_OUTPUT"
+
           echo "Planned ${#list[@]} attempt(s): ${list[*]}"
+
+  # Refused here, not inside the matrix: a missing or ambiguous credential is
+  # discovered before any runner starts, and the failure names the input rather
+  # than surfacing as N identical agent errors.
+  credentials:
+    name: Check credentials
+    # No job-level `if`. A SKIPPED job propagates its skip to everything that
+    # `needs` it, so gating this on dry_run would silently skip the whole
+    # matrix on exactly the runs meant to exercise it. The dry-run case is
+    # branched inside the step instead, where skipping costs nothing.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Exactly one credential must be supplied
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          HAS_KEY: ${{ secrets.anthropic_api_key != '' }}
+          HAS_OAUTH: ${{ secrets.claude_code_oauth_token != '' }}
+        run: |
+          set -euo pipefail
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "dry run - no credential needed"; exit 0
+          fi
+          if [ "$HAS_KEY" = "false" ] && [ "$HAS_OAUTH" = "false" ]; then
+            echo "::error::supply either anthropic_api_key or claude_code_oauth_token (or set dry_run)"; exit 1
+          fi
+          if [ "$HAS_KEY" = "true" ] && [ "$HAS_OAUTH" = "true" ]; then
+            echo "::error::supply only ONE of anthropic_api_key / claude_code_oauth_token"; exit 1
+          fi
+          echo "credential present"
 
   attempt:
     name: ${{ matrix.variant }}
-    needs: plan
+    needs: [plan, credentials]
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ inputs.timeout_minutes }}
+    # Deliberately larger than the per-attempt timeout below. A JOB timeout
+    # CANCELS the job, and a cancelled job skips its `if: always()` steps — so
+    # the result file would never be written and the attempt would surface as
+    # `missing`, a harness fault, when what happened is that the agent ran long.
+    # Timing out the agent STEP instead leaves outcome=failure and lets the
+    # reporting steps run. This ceiling is only a backstop.
+    timeout-minutes: ${{ fromJSON(needs.plan.outputs.job_timeout) }}
     permissions:
       contents: write
       pull-requests: write
@@ -173,30 +249,38 @@ jobs:
               angle="Solve the problem in the way you judge best. State your approach in the PR body." ;;
           esac
 
-          # The instruction is written to a file rather than interpolated into a
-          # shell string: an issue body is attacker-supplied text on a public
-          # repo, and passing it through `run:` is a script-injection sink.
+          # The instruction travels as a step OUTPUT, never through a shell
+          # string: an issue body is attacker-supplied text on a public repo,
+          # and `run:` is a script-injection sink. A `with:` value is not — it
+          # reaches the action as an INPUT_* environment variable.
+          #
+          # It is not written to a file either. `anthropics/claude-code-action`
+          # exposes `prompt` and NO `prompt_file` at the top level, so a path
+          # handed to `prompt` is taken as the literal prompt text: every
+          # variant would burn a metered run and return no-changes.
+          #
+          # The heredoc delimiter is RANDOM. With a fixed `EOF` an issue body
+          # containing a bare `EOF` line closes the block early and the rest is
+          # parsed as further step outputs — arbitrary output injection.
+          delim="FANOUT_$(openssl rand -hex 16)"
           {
+            printf 'text<<%s\n' "$delim"
             printf '%s\n\n' "$angle"
             printf 'Task:\n%s\n' "$TASK"
-          } > /tmp/fanout-prompt.md
-          echo "path=/tmp/fanout-prompt.md" >> "$GITHUB_OUTPUT"
+            printf '%s\n' "$delim"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Run Claude Code
         id: agent
         if: ${{ !inputs.dry_run }}
         continue-on-error: true
+        timeout-minutes: ${{ inputs.timeout_minutes }}
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.anthropic_api_key }}
-          prompt: ${{ steps.prompt.outputs.path }}
+          claude_code_oauth_token: ${{ secrets.claude_code_oauth_token }}
+          prompt: ${{ steps.prompt.outputs.text }}
           claude_args: ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
-
-      - name: Run tests
-        id: tests
-        if: ${{ inputs.test_command != '' && !inputs.dry_run }}
-        continue-on-error: true
-        run: ${{ inputs.test_command }}
 
       - name: Measure the change
         id: measure
@@ -217,6 +301,26 @@ jobs:
           echo "add=$(git diff --cached --numstat | awk '{s+=$1} END {print s+0}')" >> "$GITHUB_OUTPUT"
           echo "del=$(git diff --cached --numstat | awk '{s+=$2} END {print s+0}')" >> "$GITHUB_OUTPUT"
 
+      # Runs AFTER `Measure the change` has staged. `make test` writes
+      # coverage files, node_modules and build output, and a `git add -A`
+      # afterwards swept all of it into the PR and into the files/+/- counts
+      # the comparison table exists to report. Staging first pins the index
+      # to the agent's changes; anything the tests create stays outside it.
+      - name: Run tests
+        id: tests
+        if: ${{ inputs.test_command != '' && !inputs.dry_run }}
+        continue-on-error: true
+        # Through env, not interpolated into the script body. This is a public
+        # reusable workflow and its own documentation wires `task` to an issue
+        # body; nothing here can stop a caller wiring `test_command` the same
+        # way, and this job holds contents:write, pull-requests:write and the
+        # API key.
+        env:
+          TEST_COMMAND: ${{ inputs.test_command }}
+        run: |
+          set -euo pipefail
+          bash -c "$TEST_COMMAND"
+
       - name: Commit and open a draft PR
         id: pr
         if: ${{ steps.measure.outputs.changed == 'true' && !inputs.dry_run }}
@@ -225,8 +329,16 @@ jobs:
           VARIANT: ${{ matrix.variant }}
           ISSUE: ${{ inputs.issue }}
           BRANCH: ${{ steps.prep.outputs.branch }}
+          # Two bugs in one line before this: a branch name may legally contain
+          # $(...), backticks, `;` and `|`, so interpolating it into the script
+          # body was an injection sink; and the PR base was github.ref_name
+          # while the checkout used inputs.base_ref, so a caller setting
+          # base_ref got a PR whose diff carried both branches apart.
+          BASE_REF: ${{ inputs.base_ref != '' && inputs.base_ref || github.ref_name }}
         run: |
           set -euo pipefail
+          # No `git add` here on purpose: the index was pinned before the
+          # tests ran, and re-adding would pull their output back in.
           git commit -q -m "feat: ${VARIANT} attempt for #${ISSUE}"
           git push -q -u origin "$BRANCH"
 
@@ -236,7 +348,7 @@ jobs:
             --draft \
             --title "[${VARIANT}] attempt for #${ISSUE}" \
             --body "Automated fan-out attempt \`${VARIANT}\` for #${ISSUE}. One of several candidates — see the comparison on the issue." \
-            --base "${{ github.ref_name }}" \
+            --base "$BASE_REF" \
             --head "$BRANCH")
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "number=$(basename "$url")" >> "$GITHUB_OUTPUT"
@@ -248,6 +360,9 @@ jobs:
           BRANCH: ${{ steps.prep.outputs.branch }}
           STARTED: ${{ steps.prep.outputs.started }}
           AGENT_OUTCOME: ${{ steps.agent.outcome }}
+          PREP_OUTCOME: ${{ steps.prep.outcome }}
+          MEASURE_OUTCOME: ${{ steps.measure.outcome }}
+          PR_OUTCOME: ${{ steps.pr.outcome }}
           TESTS_OUTCOME: ${{ steps.tests.outcome }}
           CHANGED: ${{ steps.measure.outputs.changed }}
           FILES: ${{ steps.measure.outputs.files }}
@@ -264,15 +379,39 @@ jobs:
           # above still reports. Without it a crashed attempt uploads nothing,
           # and "the agent errored" becomes indistinguishable from "the job was
           # never scheduled".
+          # Every step that can fail has to be consulted. Reading only the
+          # agent's outcome filed a broken `measure` as `no-changes` and a
+          # failed `gh pr create` as `success` with an empty PR link — both of
+          # which read as an agent verdict rather than as a harness fault.
           if [ "$DRY_RUN" = "true" ]; then
             status="no-changes"
-          elif [ "$AGENT_OUTCOME" = "failure" ]; then
+          elif [ "$AGENT_OUTCOME" = "failure" ] \
+            || [ "$PREP_OUTCOME" = "failure" ] \
+            || [ "$MEASURE_OUTCOME" = "failure" ] \
+            || [ "$PR_OUTCOME" = "failure" ]; then
             status="failed"
-          elif [ "$CHANGED" = "true" ]; then
+          elif [ "$CHANGED" = "true" ] && [ -n "${PR_URL:-}" ]; then
             status="success"
+          elif [ "$CHANGED" = "true" ]; then
+            status="failed"
           else
             status="no-changes"
           fi
+
+          # set -u does not help: STARTED is set-but-EMPTY when `Prepare
+          # attempt` died, and bash arithmetic reads an empty string as 0 — so
+          # the duration became the whole epoch (~56 years) and shipped as a
+          # plausible figure rather than as an error, from the very step that
+          # exists to report that failure.
+          if [ -z "${STARTED:-}" ]; then dur=0; else dur=$(( $(date +%s) - STARTED )); fi
+
+          # --argjson parses its value as JSON, so a non-numeric PR number kills
+          # this step outright — and this step dying is what turns a SUCCEEDED
+          # attempt into a `missing` row.
+          case "${PR_NUMBER:-}" in
+            ''|*[!0-9]*) pr=0 ;;
+            *)           pr="$PR_NUMBER" ;;
+          esac
 
           case "$TESTS_OUTCOME" in
             success) tests="passed" ;;
@@ -287,11 +426,11 @@ jobs:
             --arg  pr_url   "${PR_URL:-}" \
             --arg  tests    "$tests" \
             --arg  sha      "$(git rev-parse HEAD)" \
-            --argjson pr    "${PR_NUMBER:-0}" \
+            --argjson pr    "$pr" \
             --argjson files "${FILES:-0}" \
             --argjson add   "${ADD:-0}" \
             --argjson del   "${DEL:-0}" \
-            --argjson dur   "$(( $(date +%s) - STARTED ))" \
+            --argjson dur   "$dur" \
             '{variant:$variant, status:$status, branch:$branch, pr_number:$pr,
               pr_url:$pr_url, files_changed:$files, additions:$add,
               deletions:$del, duration_seconds:$dur, commit_sha:$sha,
@@ -312,12 +451,16 @@ jobs:
     needs: [plan, attempt]
     # always(): the comparison is most useful precisely when an attempt failed,
     # and `needs` on a failed job would skip this and leave the issue silent.
-    if: always()
+    # Gated on `plan` succeeding. download-artifact does not error when its
+    # pattern matches nothing, and the action reports an absent directory as
+    # missing rows — so a run the ceiling rejected posted an empty comparison
+    # on top of the very error the caller needed to read.
+    if: always() && needs.plan.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
       issues: write
-      pull-requests: read
     steps:
       - name: Download every attempt result
         uses: actions/download-artifact@v4

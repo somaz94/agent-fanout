@@ -50,13 +50,25 @@ Each of these is enforced by a test named for it. Reverting one produces ordinar
 - **The issue body is written to a FILE, never interpolated into `run:`.** On a public repo it is attacker-supplied text and `run:` is a script-injection sink.
 - **The attempt's result step is `if: always()`** so a crashed attempt reports `failed` rather than vanishing into `missing`.
 - **`fail-fast: false` on the matrix.** One attempt failing must not cancel its siblings — comparing the survivors is the point.
-- **`compare` runs under `if: always()`.** The comparison is most useful when an attempt failed.
+- **`compare` runs under `if: always()`, but gated on `plan` succeeding.** The comparison is most useful when an attempt failed — yet `download-artifact` does not error on a pattern that matches nothing, so a run the ceiling rejected posted an empty table on top of the error the caller needed to read.
+- **Every string that reaches the rendered body from outside the package is escaped, not just the ones noticed first.** A pipe in a PR URL shifts the columns exactly as a pipe in a variant name does. Newlines are the load-bearing case: the body is written to `GITHUB_OUTPUT` as a heredoc, so agent text carrying a bare `EOF` line closes it early and the rest parses as further outputs — arbitrary step-output injection, not merely a broken table.
+- **The heredoc delimiter for the prompt output is RANDOM.** A fixed `EOF` lets an issue body escape the block the same way.
+- **`prompt:` takes inline TEXT, never a path.** `claude-code-action` has no top-level `prompt_file`, so a path handed to `prompt` becomes the literal prompt — every variant burns a run and returns no-changes.
+- **The `max_variants` ceiling refuses a non-integer instead of skipping.** `[ n -gt "$MAX" ]` exits 2 on `3.5` or an empty value, and inside an `if` that reads as *false* — the guard the whole cost story rests on was fail-OPEN.
+- **The agent's timeout is on the STEP, never the job.** A job timeout CANCELS, and a cancelled job skips even `if: always()` — so a long-running agent surfaced as `missing`, a harness fault, instead of `failed`.
+- **A job that other jobs `needs` must not carry a job-level `if`.** A skipped job propagates its skip: gating the credential check on `!dry_run` would have skipped the entire matrix on exactly the runs meant to exercise it. Branch inside the step instead.
+- **The variant list is deduped.** The loader consumes each expected name once, so a repeat is reported `missing` — inventing a harness failure that never happened.
+- **Tests run AFTER the index is staged.** `make test` writes coverage files and build output, and a later `git add -A` swept them into the PR and into the very counts the comparison exists to report.
+- **`--argjson` parses its value as JSON**, so a non-numeric PR number kills the `always()` step — turning a SUCCEEDED attempt into a `missing` row.
+- **An empty `STARTED` is not caught by `set -u`.** It is set-but-empty, and bash arithmetic reads that as 0, so the duration became the whole epoch and shipped as a plausible figure.
 
 <br/>
 
 ## Cost
 
-There is no subscription path in CI — `claude-code-action` takes an API key, Bedrock, Vertex or Foundry. N variants is N× the tokens. `max_variants`, `dry_run` and the label-only trigger are the three guards, and none of them may be softened without saying so in the README.
+N variants is N× the work. Two credentials are accepted and exactly one must be supplied — `anthropic_api_key` (metered, per token) or `claude_code_oauth_token` (a Claude subscription's limits); the `credentials` job refuses both-or-neither before a runner starts. An earlier version of this file claimed CI had no subscription path at all, which was simply wrong.
+
+`max_variants`, `dry_run`, the credential check and the label-only trigger are the guards, and none may be softened without saying so in the README.
 
 <br/>
 

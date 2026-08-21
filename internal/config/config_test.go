@@ -89,3 +89,30 @@ func TestExplicitRepositoryWinsOverEnvironment(t *testing.T) {
 		t.Fatalf("Repository = %q, want the explicit input", got)
 	}
 }
+
+// A repeated variant must collapse. The loader consumes each expected name
+// once, so a duplicate finds nothing left and is reported MISSING — which
+// invents a harness failure that never happened, in the one signal the whole
+// comparison has to be trusted about.
+func TestDuplicateVariantsCollapseInsteadOfBecomingPhantomMissingRows(t *testing.T) {
+	cases := map[string][]string{
+		"a,b,a":     {"a", "b"},
+		"a,a,a":     {"a"},
+		"a, b , a ": {"a", "b"},
+		"a\nb\na":   {"a", "b"},
+	}
+	for in, want := range cases {
+		if got := splitList(in); !reflect.DeepEqual(got, want) {
+			t.Errorf("splitList(%q) = %#v, want %#v", in, got, want)
+		}
+	}
+}
+
+// The FIRST occurrence wins, so the order a caller wrote is the order rendered.
+func TestDedupeKeepsTheFirstOccurrenceOrder(t *testing.T) {
+	got := splitList("refactor,conservative,refactor,minimal")
+	want := []string{"refactor", "conservative", "minimal"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("splitList = %#v, want %#v", got, want)
+	}
+}

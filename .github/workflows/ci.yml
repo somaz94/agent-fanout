@@ -56,6 +56,19 @@ jobs:
             fi
             go test ./... -v -cover -coverprofile=coverage.out
 
+            # CLAUDE.md declares a >=90% floor and nothing enforced it, so
+            # coverage could fall while CI stayed green. Measured over
+            # ./internal/... — cmd/ is the entry point and is deliberately
+            # thin, so folding it in would move the number for reasons that
+            # are not about test quality.
+            go test ./internal/... -coverprofile=internal.out >/dev/null
+            pct=$(go tool cover -func=internal.out | awk '/^total:/ {print $3}' | tr -d '%')
+            echo "internal coverage: ${pct}%"
+            if awk -v p="$pct" 'BEGIN { exit !(p < 90) }'; then
+              echo "FAIL: internal coverage ${pct}% is below the declared 90% floor"
+              exit 1
+            fi
+
       - name: Run the Container (dry-run)
         run: |
           docker run \

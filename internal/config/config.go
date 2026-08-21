@@ -71,10 +71,21 @@ func splitList(s string) []string {
 		return r == ',' || r == '\n' || r == '\r'
 	})
 	out := make([]string, 0, len(f))
+	seen := make(map[string]bool, len(f))
 	for _, v := range f {
-		if t := strings.TrimSpace(v); t != "" {
-			out = append(out, t)
+		t := strings.TrimSpace(v)
+		if t == "" {
+			continue
 		}
+		// A repeated variant must collapse, not repeat. The loader consumes
+		// each name once, so a second "a" finds nothing left and is reported
+		// MISSING — inventing a harness failure that never happened, in the
+		// one signal this tool has to be trusted about.
+		if seen[t] {
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
 	}
 	// A separator-only string means "no variants", the same as an empty one.
 	// Returning an empty-but-non-nil slice here would give the field two

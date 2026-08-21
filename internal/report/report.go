@@ -14,7 +14,10 @@ import (
 // and UPDATE its previous comment instead of appending a second one. Three
 // re-runs of a fan-out otherwise leave three tables on the issue with nothing
 // saying which is current, and the newest is at the bottom.
-const Marker = "<!-- somaz94/agent-fanout -->"
+const MarkerPrefix = "<!-- somaz94/agent-fanout"
+
+// Marker is the unscoped form, used when no issue number is known.
+const Marker = MarkerPrefix + " -->"
 
 // MarkerFor scopes the marker to one issue so two fan-outs tracked on the same
 // thread do not overwrite each other.
@@ -32,7 +35,7 @@ func Render(title string, issue int, attempts []result.Attempt) string {
 	var b strings.Builder
 	b.WriteString(MarkerFor(issue))
 	b.WriteString("\n\n## ")
-	b.WriteString(title)
+	b.WriteString(escapeText(title))
 	b.WriteString("\n\n")
 
 	b.WriteString(headline(sum))
@@ -72,7 +75,7 @@ func table(attempts []result.Attempt) string {
 	b.WriteString("|---|---|---|---:|---:|---|---:|\n")
 	for _, a := range attempts {
 		fmt.Fprintf(&b, "| `%s` | %s | %s | %s | %s | %s | %s |\n",
-			escapePipes(a.Variant),
+			escapeText(a.Variant),
 			statusLabel(a.Status),
 			prCell(a),
 			numCell(a, a.Files),
@@ -104,7 +107,7 @@ func statusLabel(s string) string {
 
 func prCell(a result.Attempt) string {
 	if a.PRNumber > 0 && a.PRURL != "" {
-		return fmt.Sprintf("[#%d](%s)", a.PRNumber, a.PRURL)
+		return fmt.Sprintf("[#%d](%s)", a.PRNumber, escapeText(a.PRURL))
 	}
 	if a.PRNumber > 0 {
 		return fmt.Sprintf("#%d", a.PRNumber)
@@ -139,7 +142,7 @@ func testsCell(a result.Attempt) string {
 	case "", "skipped", "skip":
 		return "—"
 	default:
-		return escapePipes(a.Tests)
+		return escapeText(a.Tests)
 	}
 }
 
@@ -165,12 +168,12 @@ func noteList(attempts []result.Attempt) string {
 		switch {
 		case a.LoadError != "":
 			fmt.Fprintf(&b, "- `%s` — result file could not be read: %s\n",
-				escapePipes(a.Variant), a.LoadError)
+				escapeText(a.Variant), escapeText(a.LoadError))
 		case a.Status == result.StatusMissing:
 			fmt.Fprintf(&b, "- `%s` — no result artifact was uploaded; the job likely failed before finishing.\n",
-				escapePipes(a.Variant))
+				escapeText(a.Variant))
 		case strings.TrimSpace(a.Notes) != "":
-			fmt.Fprintf(&b, "- `%s` — %s\n", escapePipes(a.Variant), strings.TrimSpace(a.Notes))
+			fmt.Fprintf(&b, "- `%s` — %s\n", escapeText(a.Variant), escapeText(strings.TrimSpace(a.Notes)))
 		}
 	}
 	if b.Len() == 0 {
@@ -187,7 +190,28 @@ func caveat() string {
 		"A smaller diff is not the same as a better change; open the PRs and decide.\n"
 }
 
-// escapePipes keeps agent-supplied text from breaking out of a table cell.
-func escapePipes(s string) string {
-	return strings.ReplaceAll(strings.ReplaceAll(s, "|", "\\|"), "\n", " ")
+// escapeText neutralises every way a string that came from OUTSIDE this package
+// can break the document it is rendered into. It must be applied to ALL of them,
+// not to the ones that were noticed first — a pipe in a PR URL shifts the
+// columns exactly as a pipe in a variant name does.
+//
+// Newlines are the load-bearing case and the reason this is not only about
+// tables: cmd/main.go hands the rendered body to output.SetOutput, which writes
+// a multi-line value to GITHUB_OUTPUT as a heredoc terminated by a bare EOF
+// line. Agent-authored text carrying such a line closes the heredoc early and
+// everything after it is parsed as further key=value pairs — an arbitrary
+// step-output injection. Folding every newline to a space ends that.
+//
+// The backtick is REPLACED rather than escaped because the variant renders
+// inside a `code span`, and a backslash inside a code span is a literal
+// backslash, not an escape. There is no spelling of an escaped backtick that
+// works there.
+func escapeText(s string) string {
+	r := strings.NewReplacer(
+		"|", "\\|",
+		"`", "'",
+		"\n", " ",
+		"\r", " ",
+	)
+	return r.Replace(s)
 }

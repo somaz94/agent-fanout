@@ -15,11 +15,20 @@ You can use the action on its own if you already have a fan-out of your own.
 
 ## 🔴 Read this before you wire it up
 
-**Every variant is a full metered agent run.** `anthropics/claude-code-action` authenticates with an API key, Bedrock, Vertex or Foundry — there is no subscription path in CI. Three variants cost three times one run, and the pipeline gets more useful the more you use it.
+**Every variant is a full agent run, and the cost multiplies by the variant count.** Three variants is three times the work of one.
+
+Two credentials are accepted and you supply exactly one — the workflow refuses both-or-neither before a runner starts:
+
+| Secret | What it draws on |
+|---|---|
+| `anthropic_api_key` | Metered API credit, billed per token |
+| `claude_code_oauth_token` | A Claude subscription's limits |
+
+Bedrock, Vertex and Foundry are also reachable through `claude-code-action` if you wire them in the caller.
 
 Three things exist to keep that honest:
 
-- `max_variants` is a **hard ceiling** checked in its own job, before a runner starts an agent. Exceeding it fails the run having spent nothing.
+- `max_variants` is a **hard ceiling** checked in its own job, before a runner starts an agent. Exceeding it fails the run having spent nothing. It refuses a non-integer rather than skipping the check — written as a bare `[ n -gt "$MAX" ]` the comparison exits 2 on `3.5` or on an empty value, and inside an `if` that reads as *false*, so the ceiling silently vanished.
 - `dry_run: true` walks the entire pipeline — plan, branch, measure, result file, comparison comment — **without calling the agent**. Run it once first.
 - The trigger in the example is a **label**, not an issue comment. Adding a label needs write access; filing an issue does not.
 
@@ -75,8 +84,13 @@ Any other name gets a neutral instruction and is asked to state its approach in 
 | `refactor` | ✅ success | [#102](…) | 9 | +260 / −143 | ❌ | 10m 31s |
 | `minimal-diff` | ⚠️ missing | — | — | — | — | — |
 
-> Rows are in the order the variants were requested — this table is **not** ranked.
-> A smaller diff is not the same as a better change; open the PRs and decide.
+<details><summary>Notes</summary>
+
+- `minimal-diff` — no result artifact was uploaded; the job likely failed before finishing.
+
+</details>
+
+> Rows are in the order the variants were requested — this table is **not** ranked. A smaller diff is not the same as a better change; open the PRs and decide.
 ```
 
 Four decisions are visible in that output, and each is there because the alternative fails silently:
@@ -119,6 +133,8 @@ Use these directly if you fan out your own way.
 | `github_token` | `${{ github.token }}` | Needs `issues: write` |
 | `title` | `Agent fan-out results` | Heading of the comparison |
 | `dry_run` | `false` | Render and print without posting |
+
+<br/>
 
 ### Outputs
 

@@ -224,3 +224,69 @@ func TestNoChangesRowSuppressesItsFigures(t *testing.T) {
 		}
 	}
 }
+
+// Every string that reaches the rendered body from OUTSIDE this package must be
+// escaped, not just the two that were noticed first. `Variant` and `Tests` were
+// escaped while `PRURL`, `Notes` and `title` were not — and the pipe in a URL
+// shifts every column after it exactly as the pipe in a variant name does.
+func TestEveryExternalStringIsEscaped(t *testing.T) {
+	cases := []struct {
+		name    string
+		attempt result.Attempt
+		title   string
+	}{
+		{"variant", result.Attempt{Variant: "a|b", Status: result.StatusSuccess}, "T"},
+		{"tests", result.Attempt{Variant: "a", Status: result.StatusSuccess, Tests: "2 passed | 1 flaky"}, "T"},
+		{"pr url", result.Attempt{Variant: "a", Status: result.StatusSuccess, PRNumber: 1, PRURL: "https://x/1|evil"}, "T"},
+		{"notes", result.Attempt{Variant: "a", Status: result.StatusSuccess, Notes: "before | after"}, "T"},
+		{"title", result.Attempt{Variant: "a", Status: result.StatusSuccess}, "Fan-out | results"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := Render(tc.title, 1, []result.Attempt{tc.attempt})
+			for _, line := range strings.Split(body, "\n") {
+				if !strings.HasPrefix(line, "| `") {
+					continue
+				}
+				// A table row has exactly 8 cell separators. Any unescaped pipe
+				// carried in from outside adds a ninth and shifts the columns.
+				if n := strings.Count(line, "|") - strings.Count(line, "\\|"); n != 8 {
+					t.Fatalf("row has %d unescaped separators, want 8: %s", n, line)
+				}
+			}
+			if strings.Contains(body, "Fan-out | results") {
+				t.Fatal("the title's pipe survived unescaped")
+			}
+		})
+	}
+}
+
+// The rendered body is written to GITHUB_OUTPUT as a heredoc terminated by a
+// bare EOF line. Agent-authored text reaching the body verbatim can therefore
+// close the heredoc early, and everything after it is parsed as further
+// key=value outputs — an arbitrary step-output injection, not just a broken
+// table.
+func TestNoAgentTextCanTerminateTheOutputHeredoc(t *testing.T) {
+	body := Render("T", 1, []result.Attempt{{
+		Variant: "a",
+		Status:  result.StatusSuccess,
+		Notes:   "line one\nEOF\nmalicious=injected",
+	}})
+	for i, line := range strings.Split(body, "\n") {
+		if strings.TrimSpace(line) == "EOF" {
+			t.Fatalf("line %d is a bare EOF; it would close the GITHUB_OUTPUT heredoc", i)
+		}
+	}
+}
+
+// A backtick is escaped too: the variant renders inside a `code span`, and a
+// backtick in the name closes it, turning the rest of the row into markup.
+func TestBackticksAndCarriageReturnsAreNeutralised(t *testing.T) {
+	body := Render("T", 1, []result.Attempt{{Variant: "a`b", Status: result.StatusSuccess, Notes: "x\ry"}})
+	if strings.Contains(body, "| `a`b`") {
+		t.Fatal("a backtick in the variant name closed its code span")
+	}
+	if strings.Contains(body, "\r") {
+		t.Fatal("a carriage return survived into the body")
+	}
+}

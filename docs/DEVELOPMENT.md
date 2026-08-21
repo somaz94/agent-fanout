@@ -74,9 +74,13 @@ Test the action locally using [act](https://github.com/nektos/act) or by pushing
 - name: Test Local Action
   uses: ./
   with:
-    output_file: output.txt
+    results_dir: tests/fixtures/results
+    variants: 'conservative,refactor,minimal-diff'
     dry_run: 'true'
 ```
+
+`output_file` is not an input here — it belonged to the template this repo was
+scaffolded from, and a copy of the old snippet failed every time it ran.
 
 <br/>
 
@@ -84,6 +88,7 @@ Test the action locally using [act](https://github.com/nektos/act) or by pushing
 
 | Workflow | Trigger | Description |
 |----------|---------|-------------|
+| `fanout.yml` | `workflow_call` | **Shipped to consumers**, not repo maintenance — the fan-out half of this repository |
 | `ci.yml` | push (main), PR, dispatch | Unit tests → Docker build → Action integration test |
 | `release.yml` | tag push `v*` | GitHub release + major tag update (v1) |
 | `changelog-generator.yml` | after release, PR merge | Auto-generate CHANGELOG.md |
@@ -91,6 +96,8 @@ Test the action locally using [act](https://github.com/nektos/act) or by pushing
 | `stale-issues.yml` | daily cron | Auto-close stale issues |
 | `dependabot-auto-merge.yml` | PR (dependabot) | Auto-merge minor/patch updates |
 | `issue-greeting.yml` | issue opened | Welcome message |
+
+<br/>
 
 ### Workflow Chain
 
@@ -120,4 +127,4 @@ Users can then reference the action as `uses: somaz94/agent-fanout@v1`.
 ## Conventions
 
 - **Commits**: Conventional Commits (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `ci:`, `chore:`)
-- **paths-ignore**: CI skips `.github/workflows/**` and `**/*.md` changes
+- **paths-ignore**: on **push to main only**, CI skips changes confined to `.github/workflows/**` or `**/*.md`. Pull requests always run. The consequence worth knowing: editing `ci.yml` and pushing it does not exercise the edit — dispatch the workflow by hand to test it
