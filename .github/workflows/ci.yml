@@ -35,8 +35,18 @@ jobs:
           test_command: |
             set -euo pipefail
             go mod tidy
-            if ! git diff --exit-code go.mod go.sum; then
-              echo 'FAIL: go.mod or go.sum is not tidy'; exit 1
+            # `git diff go.mod go.sum` fails two ways on a zero-dependency
+            # module: naming go.sum when it does not exist is a git FATAL
+            # (exit 128), not "no diff"; and `git diff` never sees an UNTRACKED
+            # file, so the go.sum that appears the moment a first dependency is
+            # added would slip through green. `git status --porcelain` answers
+            # both, and the `--` keeps the missing path a pathspec rather than
+            # a revision.
+            if [ -n "$(git status --porcelain -- go.mod go.sum)" ]; then
+              echo 'FAIL: go.mod or go.sum is not tidy'
+              git status --porcelain -- go.mod go.sum
+              git diff -- go.mod go.sum || true
+              exit 1
             fi
             go vet ./...
             if [ -n "$(gofmt -l .)" ]; then
