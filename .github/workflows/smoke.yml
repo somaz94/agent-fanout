@@ -1,0 +1,30 @@
+# Temporary: exercises the reusable workflow end to end with dry_run, so the
+# plan / credentials / attempt wiring is proven before the first release.
+# `compare` is expected to fail until v1 exists — inside a reusable workflow
+# `uses: ./` resolves against the CALLER's repository, so the action can only be
+# referenced by tag.
+name: Smoke (dry run)
+
+on:
+  workflow_dispatch:
+    inputs:
+      variants:
+        description: 'Variants to plan'
+        required: false
+        default: 'conservative,refactor,minimal-diff'
+        type: string
+
+permissions: {}
+
+jobs:
+  smoke:
+    uses: ./.github/workflows/fanout.yml
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    with:
+      issue: 1
+      task: 'Smoke test - the agent is never invoked on a dry run.'
+      variants: ${{ inputs.variants }}
+      dry_run: true
