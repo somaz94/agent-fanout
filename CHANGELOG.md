@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.0.1](https://github.com/somaz94/agent-fanout/compare/v1.0.0...v1.0.1) (2026-08-21)
+
+### Bug Fixes
+
+- quote the comparison title so YAML stops eating the issue number ([73b5768](https://github.com/somaz94/agent-fanout/commit/73b57681d1d547d63c02ed99334ed605918a30f8))
+
+### Contributors
+
+- somaz
+
+<br/>
+
 ## [v1.0.0](https://github.com/somaz94/agent-fanout/releases/tag/v1.0.0) (2026-08-21)
 
 ### Features
