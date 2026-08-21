@@ -60,6 +60,7 @@ Each of these is enforced by a test named for it. Reverting one produces ordinar
 - **The variant list is deduped.** The loader consumes each expected name once, so a repeat is reported `missing` — inventing a harness failure that never happened.
 - **Tests run AFTER the index is staged.** `make test` writes coverage files and build output, and a later `git add -A` swept them into the PR and into the very counts the comparison exists to report.
 - **`--argjson` parses its value as JSON**, so a non-numeric PR number kills the `always()` step — turning a SUCCEEDED attempt into a `missing` row.
+- **Any workflow value containing a `#` must be QUOTED.** YAML reads a `#` preceded by whitespace as a comment, so `title: Agent fan-out for #${{ inputs.issue }}` silently rendered `Agent fan-out for` with the number cut off. actionlint, yamllint and the YAML parser all accept it — the file is valid, it just means something else. Only running it showed the heading.
 - **An empty `STARTED` is not caught by `set -u`.** It is set-but-empty, and bash arithmetic reads that as 0, so the duration became the whole epoch and shipped as a plausible figure.
 
 <br/>
